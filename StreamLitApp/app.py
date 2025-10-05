@@ -17,17 +17,12 @@ This dashboard analyzes flight difficulty based on operational metrics such as:
 - Baggage Transfer Ratios  
 """)
 
-
-
-
-
-# Get folder of the current script
+# ----------------------------
+# Load Data
+# ----------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
+base_path = os.path.join(current_dir, "../casestudy_data")
 
-# Path to your data folder inside the repo
-base_path = os.path.join(current_dir, "../casestudy_data")  
-
-# Read CSVs
 pnr_remark = pd.read_csv(os.path.join(base_path, "PNR Remark Level Data.csv"))
 pnr_flight = pd.read_csv(os.path.join(base_path, "PNR Flight Level Data.csv"))
 flight = pd.read_csv(os.path.join(base_path, "Flight Level Data.csv"))
@@ -37,7 +32,9 @@ bags = pd.read_csv(os.path.join(base_path, "Bag+Level+Data.csv"))
 flight = flight[flight['company_id'] == 'UA']
 bags = bags[bags['company_id'] == 'UA']
 
+# ----------------------------
 # Merge passenger-level data
+# ----------------------------
 merge1 = pd.merge(
     pnr_flight,
     pnr_remark,
@@ -57,7 +54,9 @@ flight['actual_departure_datetime_local'] = pd.to_datetime(
 )
 flight['scheduled_departure_date_local'] = flight['scheduled_departure_datetime_local'].dt.date.astype(str)
 
+# ----------------------------
 # Combine datasets
+# ----------------------------
 final_df = pd.merge(
     merge1,
     flight[['flight_number','scheduled_departure_date_local',
@@ -67,7 +66,9 @@ final_df = pd.merge(
     how='left'
 )
 
-# Compute delay and load factor
+# ----------------------------
+# Compute delay, load factor
+# ----------------------------
 final_df['departure_delay_minutes'] = (
     final_df['actual_departure_datetime_local'] - final_df['scheduled_departure_datetime_local']
 ).dt.total_seconds() / 60
@@ -80,7 +81,9 @@ final_df['load_factor'] = np.where(
 )
 final_df['special_service_request'] = final_df['special_service_request'].fillna(0)
 
-# Flight summary aggregation
+# ----------------------------
+# Flight Summary Aggregation
+# ----------------------------
 flight_summary = final_df.groupby(
     ['flight_number','scheduled_departure_date_local']
 ).agg(
@@ -95,7 +98,9 @@ flight_summary = final_df.groupby(
 
 flight_summary['ground_buffer'] = flight_summary['ground_time'] - flight_summary['min_turn']
 
-# Baggage ratios
+# ----------------------------
+# Baggage Ratios
+# ----------------------------
 bags['bag_type'] = bags['bag_type'].str.strip().str.lower()
 bag_counts = bags.groupby(['flight_number','bag_type']).size().unstack(fill_value=0)
 
@@ -121,18 +126,24 @@ flight_summary = pd.merge(
     how='left'
 )
 
+# ----------------------------
 # Handle missing values
+# ----------------------------
 for col in ['avg_load_factor','ssr_count','avg_delay','ground_buffer','transfer_to_checked_ratio']:
     flight_summary[col] = flight_summary[col].fillna(flight_summary[col].median())
 
+# ----------------------------
 # Normalization
+# ----------------------------
 flight_summary['load_norm']  = (flight_summary['avg_load_factor'] - flight_summary['avg_load_factor'].min()) / (flight_summary['avg_load_factor'].max() - flight_summary['avg_load_factor'].min())
 flight_summary['ssr_norm']   = (flight_summary['ssr_count'] - flight_summary['ssr_count'].min()) / (flight_summary['ssr_count'].max() - flight_summary['ssr_count'].min())
 flight_summary['delay_norm'] = (flight_summary['avg_delay'] - flight_summary['avg_delay'].min()) / (flight_summary['avg_delay'].max() - flight_summary['avg_delay'].min())
 flight_summary['ground_norm']= 1 - ((flight_summary['ground_buffer'] - flight_summary['ground_buffer'].min()) / (flight_summary['ground_buffer'].max() - flight_summary['ground_buffer'].min()))
 flight_summary['bag_norm']   = (flight_summary['transfer_to_checked_ratio'] - flight_summary['transfer_to_checked_ratio'].min()) / (flight_summary['transfer_to_checked_ratio'].max() - flight_summary['transfer_to_checked_ratio'].min())
 
-# Calculate factor weights based on correlation with delay
+# ----------------------------
+# Difficulty Score (GLOBAL 0-100) and categories (GLOBAL quantiles)
+# ----------------------------
 corrs = {
     'load_norm': abs(flight_summary['load_norm'].corr(flight_summary['avg_delay'])),
     'ssr_norm': abs(flight_summary['ssr_norm'].corr(flight_summary['avg_delay'])),
@@ -144,8 +155,7 @@ corr_df = pd.DataFrame(list(corrs.items()), columns=['factor','corr_value'])
 corr_df['weight'] = corr_df['corr_value'] / corr_df['corr_value'].sum()
 weights = dict(zip(corr_df['factor'], corr_df['weight']))
 
-# Difficulty score
-flight_summary['difficulty_score'] = (
+flight_summary['difficulty_score_raw'] = (
     weights['load_norm']  * flight_summary['load_norm'] +
     weights['ssr_norm']   * flight_summary['ssr_norm'] +
     weights['delay_norm'] * flight_summary['delay_norm'] +
@@ -153,27 +163,75 @@ flight_summary['difficulty_score'] = (
     weights['bag_norm']   * flight_summary['bag_norm']
 )
 
-flight_summary['difficulty_rank'] = flight_summary.groupby('scheduled_departure_date_local')['difficulty_score'].rank(ascending=False)
-flight_summary['difficulty_category'] = pd.qcut(
-    flight_summary['difficulty_rank'],
-    q=3,
-    labels=['Easy','Medium','Difficult']
-)
+min_score = flight_summary['difficulty_score_raw'].min()
+max_score = flight_summary['difficulty_score_raw'].max()
 
-# Sidebar filters
+if pd.isna(min_score) or pd.isna(max_score) or max_score == min_score:
+    flight_summary['difficulty_score'] = 50.0
+else:
+    flight_summary['difficulty_score'] = 100 * (flight_summary['difficulty_score_raw'] - min_score) / (max_score - min_score)
+
+# global categories using quantiles (robust fallback if qcut fails)
+try:
+    flight_summary['difficulty_category'] = pd.qcut(
+        flight_summary['difficulty_score'],
+        q=3,
+        labels=['Easy', 'Medium', 'Difficult']
+    )
+except Exception:
+    q1 = np.percentile(flight_summary['difficulty_score'].dropna(), 33.3333)
+    q2 = np.percentile(flight_summary['difficulty_score'].dropna(), 66.6666)
+    def categorize(score):
+        if score <= q1:
+            return 'Easy'
+        elif score <= q2:
+            return 'Medium'
+        else:
+            return 'Difficult'
+    flight_summary['difficulty_category'] = flight_summary['difficulty_score'].apply(categorize)
+
+# ----------------------------
+# Compute Top 3 Difficulty Reasons (contribution-based)
+# ----------------------------
+def get_top_difficulty_reasons(row, weights):
+    contrib = {
+        'High Load Factor': weights['load_norm'] * row['load_norm'],
+        'Many SSR Requests': weights['ssr_norm'] * row['ssr_norm'],
+        'High Delay': weights['delay_norm'] * row['delay_norm'],
+        'Low Ground Buffer': weights['ground_norm'] * row['ground_norm'],
+        'High Bag Transfer Ratio': weights['bag_norm'] * row['bag_norm']
+    }
+    top3 = sorted(contrib.items(), key=lambda x: x[1], reverse=True)[:3]
+    return ', '.join([reason for reason, val in top3])
+
+flight_summary['top_difficulty_reasons'] = flight_summary.apply(lambda row: get_top_difficulty_reasons(row, weights), axis=1)
+
+# ----------------------------
+# Sidebar Filters
+# ----------------------------
 st.sidebar.header("Filters")
 date_list = sorted(flight_summary['scheduled_departure_date_local'].unique())
 selected_date = st.sidebar.selectbox("Select Date", date_list)
-filtered = flight_summary[flight_summary['scheduled_departure_date_local'] == selected_date]
 
-# KPI cards
+category_list = ['All','Easy','Medium','Difficult']
+selected_category = st.sidebar.selectbox("Select Difficulty Category", category_list)
+
+filtered = flight_summary[flight_summary['scheduled_departure_date_local'] == selected_date]
+if selected_category != 'All':
+    filtered = filtered[filtered['difficulty_category'] == selected_category]
+
+# ----------------------------
+# KPI Cards
+# ----------------------------
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Avg Delay (min)", f"{filtered['avg_delay'].mean():.1f}")
 col2.metric("Avg Load Factor", f"{filtered['avg_load_factor'].mean()*100:.1f}%")
 col3.metric("Total Passengers", int(filtered['total_passengers'].sum()))
-col4.metric("Difficult Flights", (filtered['difficulty_category'] == 'Difficult').sum())
+col4.metric("Flights in Selection", filtered.shape[0])
 
+# ----------------------------
 # Visualizations
+# ----------------------------
 st.markdown("### Flight Difficulty Overview")
 
 fig1 = px.bar(
@@ -196,11 +254,14 @@ fig2 = px.scatter(
 )
 st.plotly_chart(fig2, use_container_width=True)
 
-# Detailed data and weights
-st.markdown("### Detailed Flight Data")
+# ----------------------------
+# Detailed Flight Data
+# ----------------------------
+st.markdown("### Detailed Flight Data with Top 3 Difficulty Reasons")
+# difficulty_score column removed from display as requested
 st.dataframe(filtered[['flight_number','avg_delay','avg_load_factor','ssr_count',
                        'ground_buffer','transfer_to_checked_ratio',
-                       'difficulty_score','difficulty_category']])
+                       'difficulty_category','top_difficulty_reasons']])
 
 st.markdown("### Factor Weights Used in Scoring")
 st.dataframe(corr_df)
