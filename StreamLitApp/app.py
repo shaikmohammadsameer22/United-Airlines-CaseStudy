@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import os
 
 # Page configuration
 st.set_page_config(page_title="United Airlines Flight Difficulty Dashboard", layout="wide")
@@ -16,13 +17,21 @@ This dashboard analyzes flight difficulty based on operational metrics such as:
 - Baggage Transfer Ratios  
 """)
 
-# Load data
-base_path = "../Data/raw"
 
-pnr_remark = pd.read_csv(f'{base_path}/PNR Remark Level Data.csv')
-pnr_flight = pd.read_csv(f'{base_path}/PNR Flight Level Data.csv')
-flight = pd.read_csv(f'{base_path}/Flight Level Data.csv')
-bags = pd.read_csv(f'{base_path}/Bag+Level+Data.csv')
+
+
+
+# Get folder of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Path to your data folder inside the repo
+base_path = os.path.join(current_dir, "../casestudy_data")  
+
+# Read CSVs
+pnr_remark = pd.read_csv(os.path.join(base_path, "PNR Remark Level Data.csv"))
+pnr_flight = pd.read_csv(os.path.join(base_path, "PNR Flight Level Data.csv"))
+flight = pd.read_csv(os.path.join(base_path, "Flight Level Data.csv"))
+bags = pd.read_csv(os.path.join(base_path, "Bag+Level+Data.csv"))
 
 # Filter for United Airlines
 flight = flight[flight['company_id'] == 'UA']
